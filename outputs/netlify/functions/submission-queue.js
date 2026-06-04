@@ -7,7 +7,7 @@ exports.handler = async event => {
 
   try {
     if (event.httpMethod === "GET") {
-      const rows = await readRows();
+      const rows = await readRows(event);
       return json(200, { rows: rows.sort(bySubmittedDesc) });
     }
 
@@ -16,9 +16,9 @@ exports.handler = async event => {
       const incoming = Array.isArray(payload?.rows) ? payload.rows : [payload?.row || payload].filter(Boolean);
       if (!incoming.length) return json(400, { message: "Missing queue row." });
 
-      const existing = await readRows();
+      const existing = await readRows(event);
       const merged = mergeRows(existing, incoming.map(normalizeRow).filter(Boolean));
-      await writeRows(merged);
+      await writeRows(event, merged);
       return json(200, { message: "Queue saved.", rows: merged.sort(bySubmittedDesc) });
     }
 
@@ -28,19 +28,31 @@ exports.handler = async event => {
   }
 };
 
-async function getQueueStore() {
-  const { getStore } = await import("@netlify/blobs");
+async function getQueueStore(event) {
+  const { connectLambda, getStore } = await import("@netlify/blobs");
+
+  if (event) {
+    connectLambda(event);
+  }
+
+  const siteID = process.env.NETLIFY_SITE_ID || process.env.SITE_ID;
+  const token = process.env.NETLIFY_BLOBS_TOKEN || process.env.NETLIFY_AUTH_TOKEN;
+
+  if (siteID && token) {
+    return getStore({ name: STORE_NAME, siteID, token });
+  }
+
   return getStore(STORE_NAME);
 }
 
-async function readRows() {
-  const store = await getQueueStore();
+async function readRows(event) {
+  const store = await getQueueStore(event);
   const rows = await store.get(QUEUE_KEY, { type: "json" }).catch(() => []);
   return Array.isArray(rows) ? rows.filter(Boolean) : [];
 }
 
-async function writeRows(rows) {
-  const store = await getQueueStore();
+async function writeRows(event, rows) {
+  const store = await getQueueStore(event);
   await store.setJSON(QUEUE_KEY, rows.sort(bySubmittedAsc).slice(-MAX_ROWS));
 }
 
