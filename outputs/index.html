@@ -7982,7 +7982,7 @@
       els.asanaExportAction.disabled = !ready;
     }
 
-    function loadSubmissionQueue() {
+    function loadLocalSubmissionQueue() {
       try {
         const rows = JSON.parse(localStorage.getItem(submissionQueueStorageKey) || "[]");
         return Array.isArray(rows) ? rows : [];
@@ -7991,8 +7991,56 @@
       }
     }
 
-    function saveSubmissionQueue(rows) {
+    function saveLocalSubmissionQueue(rows) {
       localStorage.setItem(submissionQueueStorageKey, JSON.stringify(rows.slice(-100), null, 2));
+    }
+
+    async function fetchSubmissionQueue() {
+      const localRows = loadLocalSubmissionQueue();
+      try {
+        if (localRows.length && !sessionStorage.getItem("cirrus-queue-migrated-v1")) {
+          await saveSubmissionQueue(localRows);
+          sessionStorage.setItem("cirrus-queue-migrated-v1", "true");
+        }
+        const response = await fetch("/.netlify/functions/submission-queue");
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.message || `Queue returned ${response.status}`);
+        const rows = Array.isArray(data.rows) ? data.rows : [];
+        saveLocalSubmissionQueue(rows);
+        return rows;
+      } catch (error) {
+        console.warn("Using local submission queue fallback.", error);
+        return localRows;
+      }
+    }
+
+    async function saveSubmissionQueue(rowsOrRow) {
+      const rows = Array.isArray(rowsOrRow) ? rowsOrRow : [rowsOrRow].filter(Boolean);
+      const localRows = mergeSubmissionRows(loadLocalSubmissionQueue(), rows);
+      saveLocalSubmissionQueue(localRows);
+      try {
+        const response = await fetch("/.netlify/functions/submission-queue", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rows })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.message || `Queue returned ${response.status}`);
+        if (Array.isArray(data.rows)) saveLocalSubmissionQueue(data.rows);
+        return data.rows || localRows;
+      } catch (error) {
+        console.warn("Saved submission queue locally only.", error);
+        return localRows;
+      }
+    }
+
+    function mergeSubmissionRows(existing, incoming) {
+      const byId = new Map();
+      [...existing, ...incoming].filter(Boolean).forEach(row => {
+        const id = row.id || `${row.submittedAt || Date.now()}-${Math.random().toString(16).slice(2)}`;
+        byId.set(id, { ...row, id });
+      });
+      return Array.from(byId.values()).sort((a, b) => new Date(a.submittedAt || 0) - new Date(b.submittedAt || 0)).slice(-100);
     }
 
     function asanaTaskUrl(projectGid, taskGid) {
@@ -8004,11 +8052,10 @@
       return select?.selectedOptions?.[0]?.textContent?.trim() || "";
     }
 
-    function addSubmissionQueueEntry({ guide, result, filename }) {
-      const rows = loadSubmissionQueue();
+    async function addSubmissionQueueEntry({ guide, result, filename }) {
       const projectGid = els.asanaProjectSelect.value || state.integrations.asana.projectGid || "";
       const taskGid = result?.taskGid || els.asanaTaskSelect.value || "";
-      rows.push({
+      const row = {
         id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
         submittedAt: new Date().toISOString(),
         brandName: guide.project.displayName || "Untitled site",
@@ -8028,13 +8075,14 @@
           spacing: guide.spacing.rules.length,
           forms: guide.forms.fields.length
         }
-      });
-      saveSubmissionQueue(rows);
+      };
+      await saveSubmissionQueue(row);
     }
 
-    function renderSubmissionQueue() {
+    async function renderSubmissionQueue() {
       if (!els.queueList) return;
-      const rows = loadSubmissionQueue().sort((a, b) => new Date(a.submittedAt) - new Date(b.submittedAt));
+      els.queueList.innerHTML = `<div class="queue-empty">Loading queue...</div>`;
+      const rows = (await fetchSubmissionQueue()).sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt));
       if (!rows.length) {
         els.queueList.innerHTML = `<div class="queue-empty">No submissions yet. Successful Asana exports will appear here.</div>`;
         return;
@@ -8068,8 +8116,8 @@
     }
 
     function openSubmissionQueue() {
-      renderSubmissionQueue();
       if (els.queueModal) els.queueModal.hidden = false;
+      renderSubmissionQueue();
     }
 
     function closeSubmissionQueue() {
@@ -8154,7 +8202,7 @@
         if (!response.ok) throw new Error(result.message || `Asana returned ${response.status}`);
         state.integrations.asana.parentTaskGid = taskGid;
         state.integrations.asana.projectGid = els.asanaProjectSelect.value || state.integrations.asana.projectGid || "";
-        addSubmissionQueueEntry({ guide, result, filename });
+        await addSubmissionQueueEntry({ guide, result, filename });
         save(false);
         els.asanaExportStatus.textContent = result.message || "Details sent to Asana.";
         els.asanaExportAction.textContent = "Details Sent";
