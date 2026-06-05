@@ -3236,6 +3236,7 @@
     const storageKey = "cirrus-site-system-builder-v12";
     const submissionQueueStorageKey = "cirrus-site-system-submission-queue-v1";
     const presetStorageKey = "cirrus-site-system-builder-presets-v1";
+    const hqIntakeEndpoint = window.CIRRUS_HQ_INTAKE_ENDPOINT || "https://cirrus-local-headquarters.netlify.app/api/hq-intake";
     const exportSchemaVersion = "2026-06-01.1";
     const fonts = [
       "ABeeZee", "Abril Fatface", "Acumin Pro", "Afacad", "Alegreya", "Alegreya Sans", "Aleo", "Alice", "Almarai",
@@ -7995,6 +7996,34 @@
       localStorage.setItem(submissionQueueStorageKey, JSON.stringify(rows.slice(-100), null, 2));
     }
 
+    async function mirrorSubmissionToHQ(row) {
+      if (!row) return;
+      try {
+        await fetch(hqIntakeEndpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Cirrus-Source": "website-design-intake-app"
+          },
+          body: JSON.stringify({
+            id: row.id,
+            sourceRepository: "CirrusMediaLLC/website-design-intake-app",
+            sourceForm: "website-design-intake",
+            sourceType: "client_design",
+            businessName: row.brandName,
+            clientName: row.owner,
+            industry: row.industry,
+            status: row.taskGid ? "Synced" : "Ready for Build",
+            summary: row.message,
+            submittedAt: row.submittedAt,
+            payload: row
+          })
+        });
+      } catch (error) {
+        console.warn("HQ mirror skipped.", error);
+      }
+    }
+
     async function fetchSubmissionQueue() {
       const localRows = loadLocalSubmissionQueue();
       try {
@@ -8018,6 +8047,7 @@
       const rows = Array.isArray(rowsOrRow) ? rowsOrRow : [rowsOrRow].filter(Boolean);
       const localRows = mergeSubmissionRows(loadLocalSubmissionQueue(), rows);
       saveLocalSubmissionQueue(localRows);
+      rows.forEach(row => mirrorSubmissionToHQ(row));
       try {
         const response = await fetch("/.netlify/functions/submission-queue", {
           method: "POST",
